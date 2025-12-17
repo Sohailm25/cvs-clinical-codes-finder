@@ -232,16 +232,17 @@ def main():
     **HCPCS** (supplies/services), **UCUM** (units), **HPO** (phenotypes)
     """)
 
-    # Search input
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        query = st.text_input(
-            "Search term",
-            placeholder="e.g., diabetes, glucose test, metformin 500 mg, wheelchair",
-            label_visibility="collapsed",
-        )
-    with col2:
-        search_button = st.button("🔍 Search", type="primary", use_container_width=True)
+    # Search input (wrapped in form so Enter submits)
+    with st.form("search_form", clear_on_submit=False):
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            query = st.text_input(
+                "Search term",
+                placeholder="e.g., diabetes, glucose test, metformin 500 mg, wheelchair",
+                label_visibility="collapsed",
+            )
+        with col2:
+            search_button = st.form_submit_button("🔍 Search", type="primary", use_container_width=True)
 
     # Example queries
     st.caption("**Try these examples:** diabetes | glucose test | metformin 500 mg | wheelchair | mg/dL | ataxia")
