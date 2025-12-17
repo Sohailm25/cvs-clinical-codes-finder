@@ -1,6 +1,9 @@
 # ABOUTME: LangGraph definition for the Clinical Codes Finder agent.
 # ABOUTME: Defines the state machine with Plan-Execute-Reflect-Consolidate pattern.
 
+import time
+from typing import AsyncGenerator
+
 from langgraph.graph import StateGraph, END
 
 from src.agent.state import AgentState, create_initial_state
@@ -10,6 +13,14 @@ from src.agent.nodes.execute import execute_node
 from src.agent.nodes.reflect import reflect_node, should_refine
 from src.agent.nodes.consolidate import consolidate_node
 from src.agent.nodes.summarize import summarize_node
+from src.agent.multi_hop import multi_hop_node
+
+
+def should_multi_hop(state: AgentState) -> str:
+    """Determine if multi-hop expansion should run."""
+    if state.get("multi_hop_enabled", False):
+        return "multi_hop"
+    return "execute"
 
 
 def build_graph() -> StateGraph:
@@ -17,13 +28,14 @@ def build_graph() -> StateGraph:
     Build the Clinical Codes Finder agent graph.
 
     Flow:
-    classify -> plan -> execute -> reflect -> [refine: plan | consolidate] -> summarize -> END
+    classify -> plan -> [multi_hop if enabled] -> execute -> reflect -> [refine: plan | consolidate] -> summarize -> END
     """
     graph = StateGraph(AgentState)
 
     # Add nodes
     graph.add_node("classify", classify_node)
     graph.add_node("plan", plan_node)
+    graph.add_node("multi_hop", multi_hop_node)
     graph.add_node("execute", execute_node)
     graph.add_node("reflect", reflect_node)
     graph.add_node("consolidate", consolidate_node)
@@ -31,7 +43,19 @@ def build_graph() -> StateGraph:
 
     # Add edges
     graph.add_edge("classify", "plan")
-    graph.add_edge("plan", "execute")
+
+    # Conditional: plan -> multi_hop (if enabled) or -> execute
+    graph.add_conditional_edges(
+        "plan",
+        should_multi_hop,
+        {
+            "multi_hop": "multi_hop",
+            "execute": "execute",
+        },
+    )
+
+    # multi_hop always leads to execute
+    graph.add_edge("multi_hop", "execute")
     graph.add_edge("execute", "reflect")
 
     # Conditional edge: reflect decides if we refine or consolidate
@@ -75,3 +99,44 @@ async def run_agent(query: str) -> AgentState:
     result = await app.ainvoke(initial_state)
 
     return result
+
+
+async def run_agent_streaming(
+    query: str,
+    *,
+    multi_hop_enabled: bool = False,
+    user_clarification: str | None = None,
+) -> AsyncGenerator[dict, None]:
+    """
+    Run the Clinical Codes Finder agent with streaming updates.
+
+    Yields events as each node completes, enabling real-time UI updates.
+
+    Args:
+        query: Clinical term to search for
+        multi_hop_enabled: Whether to expand searches with clinical relationships
+        user_clarification: User's chosen intent to override ambiguity
+
+    Yields:
+        dict with keys:
+            - node: Name of the node that just completed
+            - state: Updated state from that node
+            - timestamp: Unix timestamp of the event
+    """
+    app = compile_graph()
+    initial_state = create_initial_state(
+        query,
+        multi_hop_enabled=multi_hop_enabled,
+    )
+
+    # Apply user clarification if provided
+    if user_clarification:
+        initial_state["user_clarification"] = user_clarification
+
+    async for event in app.astream(initial_state, stream_mode="updates"):
+        for node_name, state_update in event.items():
+            yield {
+                "node": node_name,
+                "state": state_update,
+                "timestamp": time.time(),
+            }

@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 
 from src.agent.state import AgentState, IntentScores, INTENT_TO_SYSTEMS
+from src.agent.parsing import parse_query, needs_clarification, get_clarification_options
 from src.config import config
 
 
@@ -157,8 +158,10 @@ async def classify_node(state: AgentState) -> dict[str, Any]:
     LangGraph node: Classify query intent and select relevant coding systems.
 
     Returns updates to state with intent_scores, selected_systems, search_terms.
+    Also detects ambiguous queries that may need clarification.
     """
     query = state["query"]
+    user_clarification = state.get("user_clarification")
 
     # Rule-based classification (fast)
     rule_scores = apply_rule_based_classification(query)
@@ -170,11 +173,55 @@ async def classify_node(state: AgentState) -> dict[str, Any]:
         # High confidence from rules, skip LLM
         final_scores = rule_scores
         reasoning = f"Classified query using pattern matching (high confidence: {max_rule_score:.2f})"
+        clarification_needed = False
+        clarification_options: list[dict] = []
     else:
-        # Use LLM for semantic classification
-        llm_scores = await classify_with_llm(query)
+        # Use LLM for semantic classification with entity extraction
+        parsed = await parse_query(query)
+        llm_scores = IntentScores(
+            diagnosis=parsed.intent_diagnosis,
+            laboratory=parsed.intent_laboratory,
+            medication=parsed.intent_medication,
+            supply_service=parsed.intent_supplies,
+            unit=parsed.intent_units,
+            phenotype=parsed.intent_phenotype,
+        )
         final_scores = merge_scores(rule_scores, llm_scores)
         reasoning = f"Classified query using LLM + patterns (merged scores)"
+
+        # Check for ambiguity (only if no user clarification already provided)
+        if user_clarification is None and needs_clarification(parsed):
+            clarification_needed = True
+            clarification_options = get_clarification_options(parsed)
+            if parsed.ambiguity_reason:
+                reasoning += f"; ambiguous: {parsed.ambiguity_reason}"
+        else:
+            clarification_needed = False
+            clarification_options = []
+
+    # If user provided clarification, force that intent
+    if user_clarification:
+        intent_map = {
+            "diagnosis": "diagnosis",
+            "laboratory": "laboratory",
+            "medication": "medication",
+            "supplies": "supply_service",
+            "units": "unit",
+            "phenotype": "phenotype",
+        }
+        forced_intent = intent_map.get(user_clarification, user_clarification)
+        # Boost the clarified intent
+        final_scores = IntentScores(
+            diagnosis=0.9 if forced_intent == "diagnosis" else 0.1,
+            laboratory=0.9 if forced_intent == "laboratory" else 0.1,
+            medication=0.9 if forced_intent == "medication" else 0.1,
+            supply_service=0.9 if forced_intent == "supply_service" else 0.1,
+            unit=0.9 if forced_intent == "unit" else 0.1,
+            phenotype=0.9 if forced_intent == "phenotype" else 0.1,
+        )
+        reasoning = f"Using user clarification: {user_clarification}"
+        clarification_needed = False
+        clarification_options = []
 
     # Select systems above threshold
     selected = select_systems(final_scores, config.CONFIDENCE_THRESHOLD)
@@ -189,5 +236,7 @@ async def classify_node(state: AgentState) -> dict[str, Any]:
         "intent_scores": final_scores,
         "selected_systems": selected,
         "search_terms": [query],  # Initial search term is the raw query
+        "clarification_needed": clarification_needed,
+        "clarification_options": clarification_options,
         "reasoning_trace": [reasoning],
     }

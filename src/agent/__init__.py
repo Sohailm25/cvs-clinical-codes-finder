@@ -2,7 +2,7 @@
 # ABOUTME: Uses LangGraph for stateful, iterative search with refinement.
 
 from src.agent.state import AgentState, create_initial_state, IntentScores
-from src.agent.graph import build_graph, compile_graph, run_agent
+from src.agent.graph import build_graph, compile_graph, run_agent, run_agent_streaming
 
 __all__ = [
     "AgentState",
@@ -11,4 +11,5 @@ __all__ = [
     "build_graph",
     "compile_graph",
     "run_agent",
+    "run_agent_streaming",
 ]

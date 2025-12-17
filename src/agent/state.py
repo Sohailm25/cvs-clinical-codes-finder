@@ -28,8 +28,20 @@ class AgentState(TypedDict):
     intent_scores: IntentScores
     selected_systems: list[str]
 
+    # Clarification (optional)
+    clarification_needed: bool
+    clarification_options: list[dict]  # List of {intent, label}
+    user_clarification: str | None  # User's chosen intent (if any)
+
     # Planning
     search_terms: list[str]
+
+    # Multi-hop expansion (optional)
+    multi_hop_enabled: bool
+    related_terms: list[str]
+
+    # Hierarchy awareness (optional)
+    hierarchy_info: dict[str, dict]  # code -> {parent_code, parent_display}
 
     # Execution tracking
     iteration: int
@@ -47,7 +59,12 @@ class AgentState(TypedDict):
     reasoning_trace: Annotated[list[str], add]
 
 
-def create_initial_state(query: str) -> AgentState:
+def create_initial_state(
+    query: str,
+    *,
+    clarification_enabled: bool = True,
+    multi_hop_enabled: bool = False,
+) -> AgentState:
     """Create initial state for a new query."""
     return AgentState(
         query=query,
@@ -60,7 +77,18 @@ def create_initial_state(query: str) -> AgentState:
             phenotype=0.0,
         ),
         selected_systems=[],
+        # Clarification
+        clarification_needed=False,
+        clarification_options=[],
+        user_clarification=None,
+        # Planning
         search_terms=[],
+        # Multi-hop
+        multi_hop_enabled=multi_hop_enabled,
+        related_terms=[],
+        # Hierarchy
+        hierarchy_info={},
+        # Execution
         iteration=0,
         api_calls=[],
         raw_results={},
