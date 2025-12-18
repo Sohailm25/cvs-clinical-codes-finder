@@ -1,79 +1,27 @@
-# ABOUTME: Streamlit UI for Clinical Codes Finder.
-# ABOUTME: Provides search interface with real-time "thinking" visualization.
+# ABOUTME: Streamlit chat-style UI for Clinical Codes Finder.
+# ABOUTME: Provides conversational interface with persistent session history.
 
 import asyncio
 import queue
 import threading
-import time
-from typing import Any
 
 import streamlit as st
 
-from src.agent.graph import run_agent_streaming, compile_graph
-from src.agent.state import AgentState, create_initial_state
-from src.tools.base import CodeResult
-
-
-def get_confidence_badge(confidence: float) -> str:
-    """Get a colored badge based on confidence level."""
-    if confidence >= 0.7:
-        return "🟢 High"
-    elif confidence >= 0.4:
-        return "🟡 Medium"
-    else:
-        return "🔴 Low"
-
-
-def format_results_by_system(results: list[CodeResult]) -> dict[str, list[CodeResult]]:
-    """Group results by coding system."""
-    by_system: dict[str, list[CodeResult]] = {}
-    for r in results:
-        if r.system not in by_system:
-            by_system[r.system] = []
-        by_system[r.system].append(r)
-    return by_system
-
-
-def display_results(results: list[CodeResult]):
-    """Display results grouped by system."""
-    if not results:
-        st.warning("No results found. Try a different search term.")
-        return
-
-    by_system = format_results_by_system(results)
-
-    for system, system_results in by_system.items():
-        with st.expander(f"**{system}** ({len(system_results)} results)", expanded=True):
-            for r in system_results:
-                col1, col2 = st.columns([1, 4])
-                with col1:
-                    st.code(r.code)
-                with col2:
-                    st.write(f"**{r.display}**")
-                    st.caption(f"Confidence: {get_confidence_badge(r.confidence)} ({r.confidence:.2f})")
-
-
-def display_thinking(reasoning_trace: list[str]):
-    """Display the agent's reasoning trace."""
-    with st.expander("🧠 Agent Thinking Process", expanded=False):
-        for i, trace in enumerate(reasoning_trace, 1):
-            st.markdown(f"{i}. {trace}")
-
-
-def display_api_calls(api_calls: list[dict]):
-    """Display API call summary."""
-    if not api_calls:
-        return
-
-    with st.expander("📡 API Calls Made", expanded=False):
-        success_count = sum(1 for c in api_calls if c.get("status") == "success")
-        error_count = len(api_calls) - success_count
-
-        st.caption(f"Total: {len(api_calls)} calls ({success_count} successful, {error_count} errors)")
-
-        for call in api_calls:
-            status_icon = "✅" if call.get("status") == "success" else "❌"
-            st.text(f"{status_icon} {call.get('system', 'Unknown')}: '{call.get('term', '')}' → {call.get('count', 0)} results")
+from src.agent.graph import run_agent_streaming
+from src.ui.session import (
+    init_session_state,
+    get_current_session,
+    add_message,
+)
+from src.ui.sidebar import render_sidebar
+from src.ui.chat import (
+    render_user_message,
+    render_assistant_message,
+    render_results_compact,
+    render_thinking_trace,
+    render_api_calls,
+    render_intent_scores,
+)
 
 
 def run_async_in_thread(
@@ -136,7 +84,6 @@ def streaming_search(
 
     # Track final state as we receive updates
     final_state: dict = {}
-    completed_nodes: list[str] = []
 
     while True:
         try:
@@ -154,7 +101,6 @@ def streaming_search(
 
         # Merge state update into final state
         final_state.update(state_update)
-        completed_nodes.append(node)
 
         # Update status display
         icon, message = NODE_STATUS_MESSAGES.get(node, ("⏳", f"Processing {node}..."))
@@ -179,8 +125,146 @@ def streaming_search(
     return final_state
 
 
+def handle_query(query: str, settings: dict):
+    """
+    Handle a new user query with streaming and chat display.
+
+    Args:
+        query: The user's search query.
+        settings: Current settings dict.
+    """
+    # Add user message to session
+    add_message("user", query)
+
+    # Display user message
+    render_user_message(query)
+
+    # Create assistant message with streaming status
+    with st.chat_message("assistant", avatar="🏥"):
+        status_placeholder = st.empty()
+
+        try:
+            # Run streaming search
+            result = streaming_search(
+                query,
+                status_placeholder,
+                multi_hop_enabled=settings.get("multi_hop_enabled", False),
+            )
+
+            # Check if clarification is needed
+            if settings.get("clarification_enabled", True) and result.get("clarification_needed"):
+                status_placeholder.empty()
+                st.write("🤔 This query could apply to multiple coding systems. What are you looking for?")
+
+                options = result.get("clarification_options", [])
+                cols = st.columns(len(options) + 1)
+
+                for i, opt in enumerate(options):
+                    with cols[i]:
+                        if st.button(opt["label"], key=f"clarify_{opt['intent']}_{query[:10]}"):
+                            # Store clarification and rerun
+                            st.session_state.pending_clarification = {
+                                "query": query,
+                                "intent": opt["intent"],
+                            }
+                            st.rerun()
+
+                with cols[-1]:
+                    if st.button("Search all", key=f"clarify_all_{query[:10]}", type="secondary"):
+                        st.session_state.pending_clarification = {
+                            "query": query,
+                            "intent": "all",
+                        }
+                        st.rerun()
+
+                # Don't save incomplete result
+                return
+
+            # Clear status
+            status_placeholder.empty()
+
+            # Display results
+            summary = result.get("summary", "")
+            if summary:
+                st.markdown(summary)
+
+            render_results_compact(result.get("consolidated_results", []))
+
+            col1, col2 = st.columns(2)
+            with col1:
+                render_thinking_trace(result.get("reasoning_trace", []))
+            with col2:
+                render_api_calls(result.get("api_calls", []))
+
+            render_intent_scores(result.get("intent_scores", {}))
+
+            # Save result to session
+            add_message("assistant", result)
+
+        except Exception as e:
+            status_placeholder.error(f"Search failed: {str(e)}")
+            st.exception(e)
+
+
+def handle_clarification(settings: dict):
+    """Handle a pending clarification response."""
+    clarification = st.session_state.pending_clarification
+    st.session_state.pending_clarification = None
+
+    query = clarification["query"]
+    intent = clarification["intent"]
+
+    # Add clarification as user message
+    if intent != "all":
+        intent_labels = {
+            "diagnosis": "diagnosis codes",
+            "laboratory": "lab test codes",
+            "medication": "medication codes",
+            "supplies": "supply/service codes",
+            "units": "unit codes",
+            "phenotype": "phenotype codes",
+        }
+        clarify_text = f"Search for {intent_labels.get(intent, intent)}"
+        add_message("user", clarify_text)
+        render_user_message(clarify_text)
+
+    # Run search with clarification
+    with st.chat_message("assistant", avatar="🏥"):
+        status_placeholder = st.empty()
+
+        try:
+            result = streaming_search(
+                query,
+                status_placeholder,
+                multi_hop_enabled=settings.get("multi_hop_enabled", False),
+                user_clarification=intent,
+            )
+
+            status_placeholder.empty()
+
+            summary = result.get("summary", "")
+            if summary:
+                st.markdown(summary)
+
+            render_results_compact(result.get("consolidated_results", []))
+
+            col1, col2 = st.columns(2)
+            with col1:
+                render_thinking_trace(result.get("reasoning_trace", []))
+            with col2:
+                render_api_calls(result.get("api_calls", []))
+
+            render_intent_scores(result.get("intent_scores", {}))
+
+            add_message("assistant", result)
+
+        except Exception as e:
+            status_placeholder.error(f"Search failed: {str(e)}")
+            st.exception(e)
+
+
 def main():
-    """Main Streamlit application."""
+    """Main Streamlit application with chat-style interface."""
     st.set_page_config(
         page_title="Clinical Codes Finder",
         page_icon="🏥",
@@ -188,168 +272,30 @@ def main():
     )
 
     # Initialize session state
-    if "clarification_choice" not in st.session_state:
-        st.session_state.clarification_choice = None
-    if "pending_query" not in st.session_state:
-        st.session_state.pending_query = None
-    if "last_result" not in st.session_state:
-        st.session_state.last_result = None
+    init_session_state()
 
-    # Settings sidebar
-    with st.sidebar:
-        st.header("⚙️ Settings")
+    # Render sidebar and get settings
+    settings = render_sidebar()
 
-        clarification_enabled = st.toggle(
-            "Ask clarifying questions",
-            value=True,
-            help="When query intent is ambiguous, show options to clarify"
-        )
-
-        multi_hop_enabled = st.toggle(
-            "Multi-hop reasoning",
-            value=False,
-            help="Expand searches with clinically related codes"
-        )
-
-        show_hierarchy = st.toggle(
-            "Show code hierarchy",
-            value=True,
-            help="Display parent codes for context"
-        )
-
-        st.divider()
-        st.caption("**About**")
-        st.caption(
-            "Clinical Codes Finder uses AI to search 6 medical coding systems: "
-            "ICD-10-CM, LOINC, RxTerms, HCPCS, UCUM, and HPO."
-        )
-
-    # Main content
+    # Header
     st.title("🏥 Clinical Codes Finder")
-    st.markdown("""
-    Enter a clinical term to find relevant codes across multiple medical coding systems:
-    **ICD-10-CM** (diagnoses), **LOINC** (lab tests), **RxTerms** (drugs),
-    **HCPCS** (supplies/services), **UCUM** (units), **HPO** (phenotypes)
-    """)
 
-    # Search input (wrapped in form so Enter submits)
-    with st.form("search_form", clear_on_submit=False):
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            query = st.text_input(
-                "Search term",
-                placeholder="e.g., diabetes, glucose test, metformin 500 mg, wheelchair",
-                label_visibility="collapsed",
-            )
-        with col2:
-            search_button = st.form_submit_button("🔍 Search", type="primary", use_container_width=True)
+    # Render existing chat messages
+    session = get_current_session()
+    for msg in session.get("messages", []):
+        if msg["role"] == "user":
+            render_user_message(msg["content"])
+        else:
+            render_assistant_message(msg["content"])
 
-    # Example queries
-    st.caption("**Try these examples:** diabetes | glucose test | metformin 500 mg | wheelchair | mg/dL | ataxia")
+    # Handle pending clarification
+    if st.session_state.get("pending_clarification"):
+        handle_clarification(settings)
 
-    st.divider()
-
-    # Handle clarification choice if pending
-    if st.session_state.clarification_choice:
-        query = st.session_state.pending_query
-        user_clarification = st.session_state.clarification_choice
-        st.session_state.clarification_choice = None
-        st.session_state.pending_query = None
-
-        # Run search with clarification
-        status_placeholder = st.empty()
-        try:
-            result = streaming_search(
-                query,
-                status_placeholder,
-                multi_hop_enabled=multi_hop_enabled,
-                user_clarification=user_clarification,
-            )
-            status_placeholder.success("✅ Search complete!")
-            st.session_state.last_result = result
-        except Exception as e:
-            status_placeholder.error(f"Search failed: {str(e)}")
-            st.exception(e)
-            return
-
-    # Run search on button click
-    elif search_button and query:
-        status_placeholder = st.empty()
-
-        try:
-            result = streaming_search(
-                query,
-                status_placeholder,
-                multi_hop_enabled=multi_hop_enabled,
-            )
-
-            # Check if clarification is needed
-            if clarification_enabled and result.get("clarification_needed"):
-                status_placeholder.empty()
-                st.warning("🤔 This query could apply to multiple coding systems. Please clarify:")
-
-                options = result.get("clarification_options", [])
-                cols = st.columns(len(options))
-                for i, opt in enumerate(options):
-                    with cols[i]:
-                        if st.button(opt["label"], key=f"clarify_{opt['intent']}"):
-                            st.session_state.clarification_choice = opt["intent"]
-                            st.session_state.pending_query = query
-                            st.rerun()
-
-                # Option to proceed anyway
-                if st.button("Search all relevant systems", type="secondary"):
-                    # Re-run without clarification
-                    result = streaming_search(
-                        query,
-                        status_placeholder,
-                        multi_hop_enabled=multi_hop_enabled,
-                        user_clarification="all",
-                    )
-                    st.session_state.last_result = result
-                else:
-                    return  # Wait for user choice
-            else:
-                status_placeholder.success("✅ Search complete!")
-                st.session_state.last_result = result
-
-        except Exception as e:
-            status_placeholder.error(f"Search failed: {str(e)}")
-            st.exception(e)
-            return
-
-    elif search_button and not query:
-        st.warning("Please enter a search term.")
-        return
-
-    # Display results if available
-    result = st.session_state.last_result
-    if result:
-        # Display summary
-        st.markdown(f"### Summary\n{result.get('summary', 'No summary available.')}")
-
-        # Display results
-        st.markdown("### Results")
-        display_results(result.get("consolidated_results", []))
-
-        # Display thinking process
-        st.markdown("### Details")
-        col1, col2 = st.columns(2)
-        with col1:
-            display_thinking(result.get("reasoning_trace", []))
-        with col2:
-            display_api_calls(result.get("api_calls", []))
-
-        # Show intent scores
-        with st.expander("🎯 Intent Classification", expanded=False):
-            scores = result.get("intent_scores", {})
-            for intent, score in scores.items():
-                if score > 0:
-                    st.progress(score, text=f"{intent}: {score:.2f}")
-
-    # Footer
-    st.divider()
-    st.caption("Powered by Clinical Tables API (NIH NLM) • Built with LangGraph & Streamlit")
+    # Chat input at bottom
+    if query := st.chat_input("Type your clinical query (e.g., diabetes, glucose test, metformin 500 mg)"):
+        handle_query(query, settings)
+        st.rerun()
 
 
 if __name__ == "__main__":
