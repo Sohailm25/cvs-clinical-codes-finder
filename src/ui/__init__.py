@@ -1,2 +1,2 @@
-# ABOUTME: Streamlit UI for Clinical Codes Finder.
-# ABOUTME: Provides search interface with real-time "thinking" visualization.
+# ABOUTME: Chainlit UI for Clinical Codes Finder.
+# ABOUTME: Chat-style interface with streaming steps and thread persistence.

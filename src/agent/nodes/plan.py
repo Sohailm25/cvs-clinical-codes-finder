@@ -1,6 +1,7 @@
 # ABOUTME: Planning node for the clinical codes agent.
 # ABOUTME: Determines search strategy and term refinements based on prior results.
 
+import re
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -8,6 +9,40 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from src.agent.state import AgentState
 from src.config import config
+
+
+# Pattern to detect compound queries: "X and Y", "X & Y", "X, Y, and Z"
+COMPOUND_QUERY_PATTERN = re.compile(
+    r'\s+(?:and|&|,\s*and)\s+',
+    re.IGNORECASE
+)
+
+
+def split_compound_query(query: str) -> list[str]:
+    """Split compound queries into individual search terms.
+
+    Examples:
+        "wheelchair and crutches" -> ["wheelchair", "crutches"]
+        "diabetes & hypertension" -> ["diabetes", "hypertension"]
+        "aspirin, tylenol, and ibuprofen" -> ["aspirin", "tylenol", "ibuprofen"]
+        "metformin 500 mg" -> ["metformin 500 mg"]  # Not split (no separator)
+    """
+    # Check if query contains compound separators
+    if not COMPOUND_QUERY_PATTERN.search(query):
+        return [query]
+
+    # Split on " and ", " & ", comma, or combinations
+    # First handle " and " and " & " as primary separators
+    parts = re.split(r'\s*(?:,\s*)?(?:and|&)\s*|\s*,\s*', query, flags=re.IGNORECASE)
+
+    # Clean up and filter empty parts
+    terms = []
+    for part in parts:
+        cleaned = part.strip().strip(',').strip()
+        if cleaned:
+            terms.append(cleaned)
+
+    return terms if terms else [query]
 
 
 REFINEMENT_PROMPT = ChatPromptTemplate.from_messages([
@@ -104,11 +139,18 @@ async def plan_node(state: AgentState) -> dict[str, Any]:
     reasoning_updates = []
 
     if iteration == 0:
-        # First iteration: use original query
-        search_terms = [query]
-        reasoning_updates.append(
-            f"Planning iteration {iteration + 1}: searching {', '.join(systems)} for '{query}'"
-        )
+        # First iteration: check for compound queries and split them
+        search_terms = split_compound_query(query)
+
+        if len(search_terms) > 1:
+            reasoning_updates.append(
+                f"Planning iteration {iteration + 1}: detected compound query, "
+                f"split into terms: {search_terms}, searching {', '.join(systems)}"
+            )
+        else:
+            reasoning_updates.append(
+                f"Planning iteration {iteration + 1}: searching {', '.join(systems)} for '{query}'"
+            )
     elif strategy:
         # Subsequent iteration with refinement needed
         results_summary = summarize_results(raw_results)

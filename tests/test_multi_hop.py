@@ -2,6 +2,8 @@
 # ABOUTME: Verifies clinical relationship expansion and code hierarchy lookups.
 
 import pytest
+from unittest.mock import patch
+
 from src.agent.multi_hop import (
     CLINICAL_RELATIONSHIPS,
     get_related_terms,
@@ -37,44 +39,60 @@ class TestClinicalRelationships:
 
 
 class TestGetRelatedTerms:
-    """Tests for related term expansion."""
+    """Tests for related term expansion using static fallback."""
 
-    def test_returns_related_diagnoses_for_icd10(self):
+    @pytest.fixture(autouse=True)
+    def disable_llm_expansion(self):
+        """Disable LLM expansion to use deterministic static fallback."""
+        with patch("src.services.expansion.config") as mock_config:
+            mock_config.EXPANSION_ENABLED = False
+            mock_config.EXPANSION_MODEL = "gpt-4o-mini"
+            mock_config.EXPANSION_CACHE_TTL = 3600
+            yield
+
+    @pytest.mark.asyncio
+    async def test_returns_related_diagnoses_for_icd10(self):
         """Should return related diagnoses when ICD-10-CM is selected."""
-        terms = get_related_terms("diabetes", ["ICD-10-CM"])
-        # Should include diabetes-related diagnoses
+        terms = await get_related_terms("diabetes", ["ICD-10-CM"])
+        # Should include diabetes-related diagnoses from static dict
         assert any("neuropathy" in t.lower() or "retinopathy" in t.lower() for t in terms)
 
-    def test_returns_related_labs_for_loinc(self):
+    @pytest.mark.asyncio
+    async def test_returns_related_labs_for_loinc(self):
         """Should return related labs when LOINC is selected."""
-        terms = get_related_terms("diabetes", ["LOINC"])
+        terms = await get_related_terms("diabetes", ["LOINC"])
         # Should include diabetes-related labs
         assert any("a1c" in t.lower() or "glucose" in t.lower() for t in terms)
 
-    def test_returns_related_meds_for_rxterms(self):
+    @pytest.mark.asyncio
+    async def test_returns_related_meds_for_rxterms(self):
         """Should return related medications when RxTerms is selected."""
-        terms = get_related_terms("diabetes", ["RxTerms"])
+        terms = await get_related_terms("diabetes", ["RxTerms"])
         # Should include diabetes medications
         assert any("metformin" in t.lower() or "insulin" in t.lower() for t in terms)
 
-    def test_respects_max_terms(self):
+    @pytest.mark.asyncio
+    async def test_respects_max_terms(self):
         """Should limit returned terms to max_terms."""
-        terms = get_related_terms("diabetes", ["ICD-10-CM", "LOINC", "RxTerms"], max_terms=3)
+        terms = await get_related_terms("diabetes", ["ICD-10-CM", "LOINC", "RxTerms"], max_terms=3)
         assert len(terms) <= 3
 
-    def test_no_duplicates(self):
+    @pytest.mark.asyncio
+    async def test_no_duplicates(self):
         """Should not return duplicate terms."""
-        terms = get_related_terms("diabetes", ["ICD-10-CM", "HPO"])
+        terms = await get_related_terms("diabetes", ["ICD-10-CM", "HPO"])
         assert len(terms) == len(set(t.lower() for t in terms))
 
-    def test_excludes_original_query(self):
+    @pytest.mark.asyncio
+    async def test_excludes_original_query(self):
         """Should not include the original query in results."""
-        terms = get_related_terms("diabetes", ["ICD-10-CM"])
+        terms = await get_related_terms("diabetes", ["ICD-10-CM"])
         assert "diabetes" not in [t.lower() for t in terms]
 
-    def test_returns_empty_for_unknown_condition(self):
+    @pytest.mark.asyncio
+    async def test_returns_empty_for_unknown_condition(self):
         """Should return empty list for unknown conditions."""
-        terms = get_related_terms("xyznotarealcondition", ["ICD-10-CM"])
+        terms = await get_related_terms("xyznotarealcondition", ["ICD-10-CM"])
         assert terms == []
 
 

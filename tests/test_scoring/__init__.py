@@ -1,2 +1,2 @@
-# ABOUTME: Unit tests for scoring and deduplication.
-# ABOUTME: Tests confidence calculation and cross-system dedup.
+# ABOUTME: Test package for scoring module.
+# ABOUTME: Contains tests for reranking and model caching.

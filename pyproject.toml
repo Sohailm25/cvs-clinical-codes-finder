@@ -26,7 +26,10 @@ dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
-    "streamlit>=1.38.0",
+    "chainlit>=2.0.0",
+    "passlib[bcrypt]>=1.7.4",
+    "sentence-transformers>=2.2.0",
+    "langgraph-checkpoint>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -38,8 +41,9 @@ dev = [
     "mypy>=1.11.0",
 ]
 
-[project.scripts]
-clinical-codes = "src.ui.app:main"
+# Note: Run with `chainlit run src/ui/chainlit_app.py`
+# [project.scripts]
+# clinical-codes = "src.ui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

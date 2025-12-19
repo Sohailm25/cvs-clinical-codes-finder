@@ -322,11 +322,13 @@ CLINICAL_RELATIONSHIPS: dict[str, dict[str, list[str]]] = {
 }
 
 
-def get_related_terms(
+async def get_related_terms(
     query: str, selected_systems: list[str], max_terms: int = 5
 ) -> list[str]:
     """
     Get clinically related search terms based on the query and selected systems.
+
+    Uses LLM-driven expansion when enabled, with static fallback.
 
     Args:
         query: Original search query
@@ -336,12 +338,47 @@ def get_related_terms(
     Returns:
         List of related search terms
     """
+    from src.services.expansion import get_expansion_service
+
+    service = await get_expansion_service()
+    expansion = await service.expand(query, selected_systems, max_per_category=max_terms)
+
+    # Flatten all categories into a single list
+    additional_terms: list[str] = []
+
+    # Add terms based on selected systems
+    if "ICD-10-CM" in selected_systems or "HPO" in selected_systems:
+        additional_terms.extend(expansion.get("diagnoses", []))
+    if "LOINC" in selected_systems or "UCUM" in selected_systems:
+        additional_terms.extend(expansion.get("labs", []))
+    if "RxTerms" in selected_systems:
+        additional_terms.extend(expansion.get("medications", []))
+
+    # Deduplicate and limit
+    query_lower = query.lower()
+    seen = set()
+    unique_terms = []
+    for term in additional_terms:
+        if term.lower() not in seen and term.lower() != query_lower:
+            seen.add(term.lower())
+            unique_terms.append(term)
+
+    return unique_terms[:max_terms]
+
+
+def get_related_terms_sync(
+    query: str, selected_systems: list[str], max_terms: int = 5
+) -> list[str]:
+    """
+    Synchronous version using static fallback only.
+
+    For backwards compatibility with non-async code.
+    """
     query_lower = query.lower()
     additional_terms: list[str] = []
 
     for condition, relations in CLINICAL_RELATIONSHIPS.items():
         if condition in query_lower:
-            # Add related items based on selected systems
             if "ICD-10-CM" in selected_systems or "HPO" in selected_systems:
                 additional_terms.extend(relations.get("related_diagnoses", []))
             if "LOINC" in selected_systems or "UCUM" in selected_systems:
@@ -374,7 +411,7 @@ async def multi_hop_node(state: AgentState) -> dict[str, Any]:
     query = state["query"]
     selected_systems = state.get("selected_systems", [])
 
-    related_terms = get_related_terms(query, selected_systems)
+    related_terms = await get_related_terms(query, selected_systems)
 
     if not related_terms:
         return {"reasoning_trace": ["Multi-hop: No clinical relationships found"]}

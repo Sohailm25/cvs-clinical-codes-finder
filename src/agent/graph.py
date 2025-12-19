@@ -2,7 +2,8 @@
 # ABOUTME: Defines the state machine with Plan-Execute-Reflect-Consolidate pattern.
 
 import time
-from typing import AsyncGenerator
+import uuid
+from typing import AsyncGenerator, Any
 
 from langgraph.graph import StateGraph, END
 
@@ -14,6 +15,7 @@ from src.agent.nodes.reflect import reflect_node, should_refine
 from src.agent.nodes.consolidate import consolidate_node
 from src.agent.nodes.summarize import summarize_node
 from src.agent.multi_hop import multi_hop_node
+from src.config import config
 
 
 def should_multi_hop(state: AgentState) -> str:
@@ -77,10 +79,16 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def compile_graph():
-    """Compile the graph for execution."""
+def compile_graph(checkpointer: Any = None):
+    """
+    Compile the graph for execution.
+
+    Args:
+        checkpointer: Optional checkpointer for state persistence.
+                      If None and CHECKPOINT_ENABLED, uses MemorySaver.
+    """
     graph = build_graph()
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 async def run_agent(query: str) -> AgentState:
@@ -106,6 +114,8 @@ async def run_agent_streaming(
     *,
     multi_hop_enabled: bool = False,
     user_clarification: str | None = None,
+    thread_id: str | None = None,
+    checkpointer: Any = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Run the Clinical Codes Finder agent with streaming updates.
@@ -116,14 +126,17 @@ async def run_agent_streaming(
         query: Clinical term to search for
         multi_hop_enabled: Whether to expand searches with clinical relationships
         user_clarification: User's chosen intent to override ambiguity
+        thread_id: Optional thread ID for checkpointing (generated if not provided)
+        checkpointer: Optional checkpointer for state persistence
 
     Yields:
         dict with keys:
             - node: Name of the node that just completed
             - state: Updated state from that node
             - timestamp: Unix timestamp of the event
+            - thread_id: The thread ID used for this run
     """
-    app = compile_graph()
+    app = compile_graph(checkpointer=checkpointer)
     initial_state = create_initial_state(
         query,
         multi_hop_enabled=multi_hop_enabled,
@@ -133,10 +146,55 @@ async def run_agent_streaming(
     if user_clarification:
         initial_state["user_clarification"] = user_clarification
 
-    async for event in app.astream(initial_state, stream_mode="updates"):
+    # Generate thread_id if checkpointing is enabled
+    effective_thread_id = thread_id or str(uuid.uuid4())
+
+    # Build config with thread_id for checkpointing
+    run_config = {"configurable": {"thread_id": effective_thread_id}}
+
+    async for event in app.astream(initial_state, config=run_config, stream_mode="updates"):
         for node_name, state_update in event.items():
             yield {
                 "node": node_name,
                 "state": state_update,
                 "timestamp": time.time(),
+                "thread_id": effective_thread_id,
+            }
+
+
+async def resume_agent_streaming(
+    thread_id: str,
+    checkpointer: Any,
+    updated_state: dict | None = None,
+) -> AsyncGenerator[dict, None]:
+    """
+    Resume an interrupted agent run from a checkpoint.
+
+    Args:
+        thread_id: The thread ID of the interrupted run
+        checkpointer: The checkpointer with saved state
+        updated_state: Optional state updates to apply before resuming
+
+    Yields:
+        Streaming updates as the agent continues execution.
+    """
+    app = compile_graph(checkpointer=checkpointer)
+
+    run_config = {"configurable": {"thread_id": thread_id}}
+
+    # If state updates provided, get current state and merge
+    if updated_state:
+        current_state = await app.aget_state(run_config)
+        if current_state and current_state.values:
+            merged_state = {**current_state.values, **updated_state}
+            await app.aupdate_state(run_config, merged_state)
+
+    # Resume from checkpoint
+    async for event in app.astream(None, config=run_config, stream_mode="updates"):
+        for node_name, state_update in event.items():
+            yield {
+                "node": node_name,
+                "state": state_update,
+                "timestamp": time.time(),
+                "thread_id": thread_id,
             }

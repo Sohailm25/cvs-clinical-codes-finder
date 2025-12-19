@@ -12,21 +12,52 @@ from src.config import config
 
 
 SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are a clinical coding assistant. Generate a concise summary of the code search results.
+    ("system", """You are a clinical coding assistant. Provide brief, actionable guidance to help users choose the right code.
 
 Query: {query}
 
 Results by system:
 {results_by_system}
 
-Write a 2-3 sentence plain-English summary that:
-1. States what was found (e.g., "Found 5 diagnosis codes for diabetes")
-2. Highlights the most relevant results
-3. Notes any important caveats (e.g., multiple formulations, ambiguous matches)
+Generate ONLY guidance and insights - do NOT list all the codes (they're shown separately).
 
-Keep the tone professional but accessible to non-technical healthcare administrators."""),
-    ("human", "Generate the summary."),
+FORMAT YOUR RESPONSE AS:
+
+### Key Findings
+- **Primary match**: **`CODE`** — brief why this matches, with the **key term** from the description bolded
+- **Alternative**: **`CODE`** — when to use this instead (bold **key differentiator**)
+- **Related**: Cross-system insight if relevant
+
+### Notes
+(ONLY if there are important caveats. Otherwise OMIT this section entirely.)
+
+FORMATTING RULES:
+- Make codes HIGHLY VISIBLE: always use **`CODE`** (bold + backticks together)
+- Bold the **key terms** in descriptions that match the query (e.g., "**glucose** measurement")
+- Be concise - 2-3 bullet points max
+- Use em dash (—) after codes for cleaner separation
+- Focus on DECISION GUIDANCE, not listing results"""),
+    ("human", "Generate the guidance summary."),
 ])
+
+
+SYSTEM_DESCRIPTIONS = {
+    "ICD-10-CM": "Diagnosis Codes",
+    "LOINC": "Lab Tests",
+    "RxTerms": "Medications",
+    "HCPCS": "Supplies & Services",
+    "UCUM": "Units of Measure",
+    "HPO": "Phenotypes & Symptoms",
+}
+
+
+def _confidence_label(confidence: float) -> str:
+    """Convert confidence score to human-readable label."""
+    if confidence > 0.6:
+        return "High"
+    elif confidence > 0.3:
+        return "Medium"
+    return "Low"
 
 
 def format_results_for_summary(results: list[CodeResult]) -> str:
@@ -40,12 +71,15 @@ def format_results_for_summary(results: list[CodeResult]) -> str:
 
     parts = []
     for system, system_results in by_system.items():
-        part = f"\n{system}:"
-        for r in system_results[:3]:  # Show top 3 per system
-            conf_label = "high" if r.confidence > 0.6 else "medium" if r.confidence > 0.3 else "low"
-            part += f"\n  - {r.code}: {r.display} (confidence: {conf_label})"
-        if len(system_results) > 3:
-            part += f"\n  ... and {len(system_results) - 3} more"
+        desc = SYSTEM_DESCRIPTIONS.get(system, "Clinical Codes")
+        part = f"\n{system} ({desc}):"
+        for r in system_results[:5]:  # Show top 5 per system
+            conf_label = _confidence_label(r.confidence)
+            part += f"\n  - Code: {r.code}"
+            part += f"\n    Display: {r.display}"
+            part += f"\n    Confidence: {conf_label} ({r.confidence:.2f})"
+        if len(system_results) > 5:
+            part += f"\n  ... and {len(system_results) - 5} more results"
         parts.append(part)
 
     return "\n".join(parts) if parts else "No results found"
@@ -73,22 +107,40 @@ async def generate_summary_with_llm(query: str, results: list[CodeResult]) -> st
 
 
 def generate_fallback_summary(query: str, results: list[CodeResult]) -> str:
-    """Generate a simple summary without LLM."""
+    """Generate a brief guidance summary without LLM."""
     if not results:
-        return f"No clinical codes found for '{query}'."
+        return ""  # No summary needed if no results
 
-    # Count by system
-    by_system: dict[str, int] = {}
-    for r in results:
-        by_system[r.system] = by_system.get(r.system, 0) + 1
+    # Key finding (best match) - only guidance, not full listing
+    parts = ["### Key Findings"]
 
-    system_parts = [f"{count} {system} code(s)" for system, count in by_system.items()]
+    best = results[0]
+    # Bold the query terms in the display
+    display = _highlight_query_terms(best.display[:80], query)
+    parts.append(f"- **Primary match**: **`{best.code}`** ({best.system}) — {display}")
 
-    if len(results) == 1:
-        r = results[0]
-        return f"Found 1 result for '{query}': {r.system} code {r.code} ({r.display})."
+    # Add alternative if there's a second result
+    if len(results) > 1:
+        alt = results[1]
+        display = _highlight_query_terms(alt.display[:60], query)
+        parts.append(f"- **Alternative**: **`{alt.code}`** ({alt.system}) — {display}")
 
-    return f"Found {len(results)} results for '{query}': {', '.join(system_parts)}."
+    return "\n".join(parts)
+
+
+def _highlight_query_terms(text: str, query: str) -> str:
+    """Bold query terms found in text for visual highlighting."""
+    import re
+    # Extract meaningful words from query (skip short words)
+    query_words = [w.lower() for w in query.split() if len(w) > 2]
+
+    result = text
+    for word in query_words:
+        # Case-insensitive replacement, preserve original case
+        pattern = re.compile(f'({re.escape(word)})', re.IGNORECASE)
+        result = pattern.sub(r'**\1**', result)
+
+    return result
 
 
 async def summarize_node(state: AgentState) -> dict[str, Any]:

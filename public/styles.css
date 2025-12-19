@@ -1,0 +1,61 @@
+/* Custom styles for Clinical Codes Finder */
+
+/* Make inline code (backticks) more prominent in messages */
+.markdown-body code:not(pre code) {
+  background-color: rgba(204, 0, 0, 0.15) !important;
+  color: #ff6b6b !important;
+  padding: 2px 6px !important;
+  border-radius: 4px !important;
+  font-weight: 600 !important;
+  font-size: 0.95em !important;
+  border: 1px solid rgba(204, 0, 0, 0.3) !important;
+}
+
+/* Light theme adjustments */
+[data-theme="light"] .markdown-body code:not(pre code) {
+  background-color: rgba(204, 0, 0, 0.1) !important;
+  color: #cc0000 !important;
+  border: 1px solid rgba(204, 0, 0, 0.2) !important;
+}
+
+/* Bold + code combination for emphasis */
+.markdown-body strong code,
+.markdown-body code strong {
+  background-color: rgba(204, 0, 0, 0.25) !important;
+  color: #ff4444 !important;
+  font-weight: 700 !important;
+  border: 1px solid rgba(204, 0, 0, 0.4) !important;
+}
+
+/* Key Findings section styling */
+.markdown-body h3 {
+  color: #4fd1c5 !important;
+  border-bottom: 2px solid rgba(79, 209, 197, 0.3);
+  padding-bottom: 8px;
+  margin-top: 16px;
+}
+
+/* System headers in results */
+.markdown-body h3:not(:first-child) {
+  margin-top: 24px;
+}
+
+/* Make the percentage badges stand out */
+.markdown-body li {
+  line-height: 1.6;
+}
+
+/* Style bullet points in Key Findings */
+.markdown-body ul li strong:first-child {
+  color: #63b3ed;
+}
+
+/* Primary match emphasis */
+.markdown-body li strong:contains("Primary") {
+  color: #48bb78 !important;
+}
+
+/* Alternative match emphasis */
+.markdown-body li strong:contains("Alternative") {
+  color: #ed8936 !important;
+}

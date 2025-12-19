@@ -2,23 +2,71 @@
 # ABOUTME: Runs parallel API calls to selected coding systems.
 
 import asyncio
+import logging
 from typing import Any
 
 from src.agent.state import AgentState
 from src.tools import ICD10Tool, LOINCTool, RxTermsTool, HCPCSTool, UCUMTool, HPOTool
-from src.tools.base import CodeResult, APIError
+from src.tools.base import ClinicalTablesClient, CodeResult, APIError
+from src.services.cache import APIResponseCache
+from src.services.http import HTTPClientManager
 from src.config import config
 
+logger = logging.getLogger(__name__)
 
-# Tool instances
-TOOLS = {
-    "ICD-10-CM": ICD10Tool(),
-    "LOINC": LOINCTool(),
-    "RxTerms": RxTermsTool(),
-    "HCPCS": HCPCSTool(),
-    "UCUM": UCUMTool(),
-    "HPO": HPOTool(),
-}
+# Shared infrastructure for all tools
+_cache: APIResponseCache | None = None
+_http_manager: HTTPClientManager | None = None
+_tools: dict | None = None
+
+
+def _get_shared_client() -> ClinicalTablesClient:
+    """Get a ClinicalTablesClient with shared cache and HTTP pooling."""
+    global _cache, _http_manager
+
+    if config.CACHE_ENABLED and _cache is None:
+        _cache = APIResponseCache(default_ttl=config.CACHE_TTL)
+        logger.info("API response caching enabled")
+
+    if _http_manager is None:
+        _http_manager = HTTPClientManager.get_instance_sync()
+        logger.info("HTTP connection pooling enabled")
+
+    return ClinicalTablesClient(
+        timeout=config.API_TIMEOUT,
+        cache=_cache if config.CACHE_ENABLED else None,
+        http_manager=_http_manager,
+    )
+
+
+def _get_tools() -> dict:
+    """Get tool instances with shared caching client."""
+    global _tools
+
+    if _tools is None:
+        client = _get_shared_client()
+        _tools = {
+            "ICD-10-CM": ICD10Tool(client=client),
+            "LOINC": LOINCTool(client=client),
+            "RxTerms": RxTermsTool(client=client),
+            "HCPCS": HCPCSTool(client=client),
+            "UCUM": UCUMTool(client=client),
+            "HPO": HPOTool(client=client),
+        }
+        logger.info("Tools initialized with shared caching client")
+
+    return _tools
+
+
+def _safe_error_message(e: Exception) -> str:
+    """Return a sanitized error message for display to users."""
+    if isinstance(e, APIError):
+        return "Clinical Tables API is temporarily unavailable"
+    if isinstance(e, asyncio.TimeoutError):
+        return "Request timed out"
+    # Log the full error for debugging, but return generic message to user
+    logger.error(f"Unexpected error in execute_search: {type(e).__name__}: {e}")
+    return "An error occurred processing the request"
 
 
 async def execute_search(
@@ -31,17 +79,16 @@ async def execute_search(
 
     Returns: (system, term, results, error_message)
     """
-    tool = TOOLS.get(system)
+    tools = _get_tools()
+    tool = tools.get(system)
     if not tool:
         return system, term, [], f"Unknown system: {system}"
 
     try:
         results = await tool.search(term, max_results=max_results)
         return system, term, results, None
-    except APIError as e:
-        return system, term, [], str(e)
     except Exception as e:
-        return system, term, [], f"Unexpected error: {e}"
+        return system, term, [], _safe_error_message(e)
 
 
 async def execute_node(state: AgentState) -> dict[str, Any]:
@@ -87,7 +134,7 @@ async def execute_node(state: AgentState) -> dict[str, Any]:
                 "system": "unknown",
                 "term": "unknown",
                 "status": "error",
-                "error": str(result),
+                "error": _safe_error_message(result),
             })
             continue
 
@@ -102,9 +149,11 @@ async def execute_node(state: AgentState) -> dict[str, Any]:
         })
 
         if code_results:
-            # Convert CodeResult to dict for storage
+            # Convert CodeResult to dict for storage, tracking which term found it
             for cr in code_results:
-                new_results[system].append(cr.to_dict())
+                result_dict = cr.to_dict()
+                result_dict["search_term"] = term  # Track which term found this result
+                new_results[system].append(result_dict)
 
     # Merge with existing results (dedupe by code)
     merged_results: dict[str, list[dict]] = {}

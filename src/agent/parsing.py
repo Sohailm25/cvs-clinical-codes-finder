@@ -91,6 +91,16 @@ Respond with a JSON object only. Use null for fields with no value."""),
 ])
 
 
+def _normalize_entity_field(value: Any) -> str | None:
+    """Normalize entity fields - convert lists to comma-separated strings."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        # LLM sometimes returns lists for compound queries like "wheelchair and crutches"
+        return ", ".join(str(v) for v in value)
+    return str(value) if value else None
+
+
 async def parse_query(query: str) -> ParsedQuery:
     """
     Parse a clinical query into structured entities and intent scores.
@@ -124,6 +134,14 @@ async def parse_query(query: str) -> ParsedQuery:
             content = content.strip()
 
         data = json.loads(content)
+
+        # Normalize entity fields that might be lists (LLM sometimes returns lists)
+        entity_fields = ["drug_name", "dose", "unit", "route", "diagnosis",
+                         "lab_test", "phenotype", "supply_item"]
+        for field in entity_fields:
+            if field in data:
+                data[field] = _normalize_entity_field(data[field])
+
         return ParsedQuery(**data)
 
     except Exception as e:

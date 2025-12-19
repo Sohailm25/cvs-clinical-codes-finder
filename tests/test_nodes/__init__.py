@@ -1,2 +1,2 @@
-# ABOUTME: Unit tests for LangGraph nodes.
-# ABOUTME: Tests state transformations and decision logic.
+# ABOUTME: Test package for agent nodes.
+# ABOUTME: Contains tests for graph node functions.

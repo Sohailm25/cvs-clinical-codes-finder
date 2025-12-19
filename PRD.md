@@ -430,7 +430,7 @@ Base URL: `https://clinicaltables.nlm.nih.gov/api`
 |----------|-----------|--------|
 | LangGraph over vanilla LangChain | Explicit state machine with conditional edges matches iterative workflow | OpenAI strategy |
 | Deterministic scoring before LLM | Prevents hallucination, ensures reproducibility | OpenAI strategy |
-| Parallel API execution | Latency optimization; APIs are independent | Anthropic strategy |
+| Parallel API execution | Latency optimization; APIs are independent | Best practice |
 | Streamlit UI | Fast to build, supports real-time updates for "thinking" panel | Gemini strategy |
-| Multi-factor confidence | More robust than single-metric ranking | Anthropic strategy |
+| Multi-factor confidence | More robust than single-metric ranking | Best practice |
 | Max 3 iterations | Prevents infinite loops; 3 is sufficient for most refinements | OpenAI strategy |

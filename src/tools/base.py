@@ -1,11 +1,19 @@
 # ABOUTME: Base HTTP client for Clinical Tables API.
-# ABOUTME: Provides async request handling with timeouts, retries, and response parsing.
+# ABOUTME: Provides async request handling with timeouts, retries, caching, and response parsing.
 
+import asyncio
+import logging
 from dataclasses import dataclass, asdict
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from urllib.parse import urlencode
 
 import httpx
+
+if TYPE_CHECKING:
+    from src.services.cache import APIResponseCache
+    from src.services.http import HTTPClientManager
+
+logger = logging.getLogger(__name__)
 
 
 class APIError(Exception):
@@ -31,12 +39,20 @@ class CodeResult:
 
 
 class ClinicalTablesClient:
-    """Async HTTP client for Clinical Tables API."""
+    """Async HTTP client for Clinical Tables API with pooling and caching."""
 
-    def __init__(self, timeout: float = 5.0, max_retries: int = 2):
+    def __init__(
+        self,
+        timeout: float = 5.0,
+        max_retries: int = 2,
+        cache: "APIResponseCache | None" = None,
+        http_manager: "HTTPClientManager | None" = None,
+    ):
         self.base_url = "https://clinicaltables.nlm.nih.gov/api"
         self.timeout = timeout
         self.max_retries = max_retries
+        self._cache = cache
+        self._http_manager = http_manager
 
     def build_url(self, table: str, params: dict[str, Any]) -> str:
         """Build full API URL with query parameters."""
@@ -45,12 +61,24 @@ class ClinicalTablesClient:
             return f"{base}?{urlencode(params)}"
         return base
 
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get HTTP client (pooled if manager provided, otherwise create new)."""
+        if self._http_manager:
+            return await self._http_manager.get_client()
+        return httpx.AsyncClient(timeout=self.timeout)
+
     async def _fetch(self, url: str) -> list[Any]:
         """Execute HTTP GET request and return JSON response."""
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        if self._http_manager:
+            client = await self._get_client()
             response = await client.get(url)
             response.raise_for_status()
             return response.json()
+        else:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.json()
 
     async def search(
         self,
@@ -60,6 +88,7 @@ class ClinicalTablesClient:
         search_fields: list[str] | None = None,
         display_fields: list[str] | None = None,
         extra_fields: list[str] | None = None,
+        use_cache: bool = True,
     ) -> list[dict[str, Any]]:
         """
         Search a Clinical Tables endpoint.
@@ -71,6 +100,7 @@ class ClinicalTablesClient:
             search_fields: Fields to search (sf parameter)
             display_fields: Fields to display (df parameter)
             extra_fields: Additional fields to return (ef parameter)
+            use_cache: Whether to use caching (default True)
 
         Returns:
             List of result dictionaries with code, display, and optional extra fields.
@@ -90,18 +120,44 @@ class ClinicalTablesClient:
         if extra_fields:
             params["ef"] = ",".join(extra_fields)
 
+        # Check cache first
+        if use_cache and self._cache:
+            cached = await self._cache.get(table, params)
+            if cached is not None:
+                logger.debug(f"Cache hit for {table}: {term}")
+                return self._parse_response(cached, extra_fields)
+
         url = self.build_url(table, params)
 
-        try:
-            response = await self._fetch(url)
-        except httpx.TimeoutException as e:
-            raise APIError(f"Request timeout for {table}: {e}") from e
-        except httpx.HTTPStatusError as e:
-            raise APIError(f"HTTP error {e.response.status_code} for {table}: {e}") from e
-        except Exception as e:
-            raise APIError(f"Request failed for {table}: {e}") from e
+        # Retry logic with exponential backoff
+        last_error: APIError | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = await self._fetch(url)
 
-        return self._parse_response(response, extra_fields)
+                # Cache successful response
+                if self._cache:
+                    await self._cache.set(table, params, response)
+
+                return self._parse_response(response, extra_fields)
+
+            except httpx.TimeoutException as e:
+                last_error = APIError(f"Request timeout for {table}: {e}")
+            except httpx.HTTPStatusError as e:
+                last_error = APIError(
+                    f"HTTP error {e.response.status_code} for {table}: {e}"
+                )
+                if e.response.status_code < 500:
+                    break  # Don't retry client errors
+            except Exception as e:
+                last_error = APIError(f"Request failed for {table}: {e}")
+
+            if attempt < self.max_retries:
+                wait_time = 0.5 * (2**attempt)  # Exponential backoff
+                logger.debug(f"Retry {attempt + 1}/{self.max_retries} after {wait_time}s")
+                await asyncio.sleep(wait_time)
+
+        raise last_error if last_error else APIError(f"Unknown error for {table}")
 
     def _parse_response(
         self,
